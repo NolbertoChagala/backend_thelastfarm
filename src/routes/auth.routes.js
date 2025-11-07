@@ -10,6 +10,7 @@ const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
 router.post('/register', async (req, res) => {
   try {
     const { email, password, displayName } = req.body;
+    console.log(req.body);
     if (!email || !password) {
       return res.status(400).json({ error: 'email y password son requeridos' });
     }
@@ -26,7 +27,6 @@ router.post('/register', async (req, res) => {
       email: userRecord.email,
       displayName: userRecord.displayName || '',
       createdAt: new Date().toISOString(),
-      // agrega campos del juego que quieras inicializar
       profile: { level: 1, xp: 0 }
     });
 
