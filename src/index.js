@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import './firebase.js'; // inicializa admin
+import './firebase.js';
 import authRouter from './routes/auth.routes.js';
 
 const app = express();

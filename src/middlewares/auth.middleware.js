@@ -1,15 +1,18 @@
-import { authAdmin } from '../firebase.js';
+import jwt from "jsonwebtoken";
 
-export async function verifyFirebaseToken(req, res, next) {
-  try {
-    const authHeader = req.headers.authorization || '';
-    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-    if (!token) return res.status(401).json({ error: 'Token faltante' });
+const JWT_SECRET = process.env.JWT_SECRET;
 
-    const decoded = await authAdmin.verifyIdToken(token);
-    req.user = decoded; // uid, email, etc.
+export const verifyToken = (req, res, next) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+
+  if (!token) return res.status(401).json({ error: 'Token requerido' });
+
+  jwt.verify(token, JWT_SECRET, (err, decoded) => {
+    if (err) return res.status(403).json({ error: 'Token inválido' });
+
+    req.user = decoded;
+    console.log('Decoded user:', req.user);
     next();
-  } catch (err) {
-    return res.status(401).json({ error: 'Token inválido', details: err.message });
-  }
-}
+  });
+};

@@ -1,95 +1,204 @@
-import { Router } from 'express';
-import axios from 'axios';
-import { authAdmin, firestore } from '../firebase.js';
-import { verifyFirebaseToken } from '../middlewares/auth.middleware.js';
+import { Router } from "express";
+import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
+import { firestore, storage } from "../firebase.js";
+import { verifyToken } from "../middlewares/auth.middleware.js";
+import admin from "../firebase.js";
+import { upload } from "../middlewares/upload.js";
+
+
 
 const router = Router();
-const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
-
-// 1) Registro: crea el usuario en Firebase Auth y su doc de perfil
-router.post('/register', async (req, res) => {
+const JWT_SECRET = process.env.JWT_SECRET;
+// ------------------------------
+// 1. REGISTRO
+// ------------------------------
+router.post("/register", async (req, res) => {
   try {
     const { email, password, displayName } = req.body;
-    console.log(req.body);
-    if (!email || !password) {
-      return res.status(400).json({ error: 'email y password son requeridos' });
-    }
 
-    const userRecord = await authAdmin.createUser({
+    if (!email || !password)
+      return res.status(400).json({ error: "email y password son requeridos" });
+
+    const existingUser = await firestore
+      .collection("users")
+      .where("email", "==", email)
+      .get();
+
+    if (!existingUser.empty)
+      return res.status(400).json({ error: "El usuario ya existe" });
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const userRef = await firestore.collection("users").add({
       email,
-      password,
-      displayName: displayName || '',
-    });
-
-    // Perfil base en Firestore
-    await firestore.collection('users').doc(userRecord.uid).set({
-      uid: userRecord.uid,
-      email: userRecord.email,
-      displayName: userRecord.displayName || '',
+      password: hashedPassword,
+      displayName: displayName || "",
+      photoURL: "", // <-- agregamos esto
       createdAt: new Date().toISOString(),
-      profile: { level: 1, xp: 0 }
+      profile: { level: 1, xp: 0 },
     });
 
     return res.status(201).json({
-      message: 'Usuario creado',
-      uid: userRecord.uid,
-      email: userRecord.email,
+      message: "Usuario creado correctamente",
+      id: userRef.id,
+      email,
     });
   } catch (err) {
-    return res.status(400).json({ error: 'No se pudo registrar', details: err.message });
+    return res
+      .status(500)
+      .json({ error: "Error al registrar", details: err.message });
   }
 });
 
-// 2) Login: usa el endpoint oficial REST de Firebase Auth (email/password)
-router.post('/login', async (req, res) => {
+// ------------------------------
+// 2. LOGIN
+// ------------------------------
+router.post("/login", async (req, res) => {
   try {
-    const { email, password, returnSecureToken = true } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: 'email y password son requeridos' });
+    const { email, password } = req.body;
+
+    const query = await firestore
+      .collection("users")
+      .where("email", "==", email)
+      .get();
+
+    if (query.empty)
+      return res.status(401).json({ error: "Credenciales inválidas" });
+
+    const userDoc = query.docs[0];
+    const user = userDoc.data();
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch)
+      return res.status(401).json({ error: "Contraseña incorrecta" });
+
+    const token = jwt.sign({ id: userDoc.id, email: user.email }, JWT_SECRET, {
+      expiresIn: "2h",
+    });
+
+    return res.json({
+      message: "Login exitoso",
+      token,
+      user: {
+        id: userDoc.id,
+        displayName: user.displayName,
+        email: user.email,
+        photoURL: user.photoURL || "",
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------
+// 3. PERFIL
+// ------------------------------
+router.get("/me", verifyToken, async (req, res) => {
+  try {
+    const doc = await firestore.collection("users").doc(req.user.id).get();
+
+    if (!doc.exists)
+      return res.status(404).json({ error: "Usuario no encontrado" });
+
+    const data = doc.data();
+    delete data.password;
+
+    return res.json({
+      user: {
+        uid: req.user.id,
+        email: data.email,
+        displayName: data.displayName,
+        photoURL: data.photoURL || "",
+        profile: data.profile || {},
+      },
+    });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ error: "Error al obtener perfil", details: err.message });
+  }
+});
+
+// ------------------------------
+// 4. SUBIR FOTO DE PERFIL
+// ------------------------------
+router.post(
+  "/upload-photo",
+  verifyToken,
+  upload.single("photo"),
+  async (req, res) => {
+    try {
+      if (!req.file)
+        return res.status(400).json({ error: "No se envió ninguna imagen" });
+
+      const bucket = admin.storage().bucket();
+
+      const fileName = `profiles/${req.user.id}_${Date.now()}.jpg`;
+      const file = bucket.file(fileName);
+
+      await file.save(req.file.buffer, {
+        contentType: req.file.mimetype,
+      });
+
+      const photoURL = await file.getSignedUrl({
+        action: "read",
+        expires: "03-01-2030",
+      });
+
+      // Guardar en Firestore
+      await firestore.collection("users").doc(req.user.id).update({
+        photoURL: photoURL[0],
+      });
+
+      return res.json({
+        message: "Foto actualizada",
+        photoURL: photoURL[0],
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+
+// ------------------------------
+// 5. ELIMINAR FOTO DE PERFIL
+// ------------------------------
+router.delete("/delete-photo", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const userDoc = await firestore.collection("users").doc(userId).get();
+    if (!userDoc.exists)
+      return res.status(404).json({ error: "Usuario no existe" });
+
+    const userData = userDoc.data();
+    const photoURL = userData.photoURL;
+
+    if (!photoURL || photoURL.trim() === "") {
+      return res.status(400).json({ error: "El usuario no tiene foto" });
     }
 
-    const url =
-      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`;
+    
+    const bucket = storage.bucket();
 
-    const { data } = await axios.post(url, {
-      email, password, returnSecureToken
+    
+    const filePath = photoURL.split("?")[0].split("/o/")[1];
+    const decodedPath = decodeURIComponent(filePath);
+
+    await bucket.file(decodedPath).delete().catch(() => {});
+
+    
+    await firestore.collection("users").doc(userId).update({
+      photoURL: "",
     });
 
-    // data.idToken (JWT), data.refreshToken, data.localId (uid)
-    return res.json({
-      uid: data.localId,
-      idToken: data.idToken,
-      refreshToken: data.refreshToken,
-      expiresIn: data.expiresIn
-    });
+    return res.json({ message: "Foto eliminada correctamente" });
   } catch (err) {
-    const msg = err?.response?.data?.error?.message || err.message;
-    return res.status(401).json({ error: 'Credenciales inválidas', details: msg });
-  }
-});
-
-// 3) Yo (ruta protegida): devuelve info del usuario y su perfil Firestore
-router.get('/me', verifyFirebaseToken, async (req, res) => {
-  try {
-    const uid = req.user.uid;
-    const doc = await firestore.collection('users').doc(uid).get();
-    const profile = doc.exists ? doc.data() : null;
-    return res.json({
-      auth: req.user,
-      profile
-    });
-  } catch (err) {
-    return res.status(500).json({ error: 'No se pudo obtener el perfil', details: err.message });
-  }
-});
-
-// 4) Logout (opcional): revoca refresh tokens (fuerza re-login en todos los dispositivos)
-router.post('/logout', verifyFirebaseToken, async (req, res) => {
-  try {
-    await authAdmin.revokeRefreshTokens(req.user.uid);
-    return res.json({ message: 'Sesión revocada' });
-  } catch (err) {
-    return res.status(500).json({ error: 'No se pudo cerrar sesión', details: err.message });
+    console.error("ERROR DELETE PHOTO:", err);
+    return res.status(500).json({ error: "Error al eliminar foto" });
   }
 });
 
